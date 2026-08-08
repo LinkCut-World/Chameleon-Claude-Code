@@ -1,0 +1,7 @@
+# Local data (contains secrets, do not commit)
+.env
+providers.json
+
+# Python
+__pycache__/
+*.pyc
