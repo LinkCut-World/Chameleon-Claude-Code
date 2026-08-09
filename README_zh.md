@@ -10,7 +10,7 @@ English: [README.md](README.md)
 
 - 提供商用 `ccc providers` 管理
 - **Method 1** — `ccc <名字>`：用指定提供商直接启动 claude
-- **Method 2** — `ccc server` + `ccc all`：本地代理，会话内用 `/model` 切换提供商
+- **Method 2** — `ccc server` + `ccc all <名字>`：本地代理，会话内用 `/model` 切换提供商
 
 ## 安装
 
@@ -83,18 +83,18 @@ CLAUDE_CODE_ATTRIBUTION_HEADER=0
 
 ```cmd
 ccc deepseek
-ccc kimi -m some-model
+ccc kimi --model sonnet
 ```
 
 ## Method 2：会话内切换
 
 本地代理按请求 model 字段里的提供商名路由；claude 走代理，所以会话内用 `/model` 切换。
 
-在一个终端启动代理，在另一个终端通过代理启动 claude：
+在一个终端启动代理，在另一个终端通过代理启动 claude。`ccc all` 需要指定启动时用的提供商：
 
 ```cmd
 ccc server
-ccc all
+ccc all deepseek
 ```
 
 在 claude 会话里，通用格式是 `/model <提供商名>` 或 `/model <提供商>/<模型>`：

@@ -9,7 +9,7 @@ Usage:
   ccc <provider> [claude args]  Start claude with a provider
   ccc clear [claude args]     Clear provider config, use default Anthropic
   ccc server                  Start the local proxy (Method 2 server)
-  ccc all [claude args]       Start claude through the proxy (Method 2 client)
+  ccc all <provider> [claude args]  Start claude through the proxy on a provider
 """
 import sys
 import os
@@ -105,18 +105,65 @@ def apply_dotenv():
             os.environ[k.strip()] = v.strip()
 
 
-def launch_claude(args):
+def claude_settings_path():
+    """Path to Claude Code's user settings.json (honours CLAUDE_CONFIG_DIR)."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude"
+    )
+    return os.path.join(cfg, "settings.json")
+
+
+def saved_model():
+    """The top-level "model" Claude Code persisted from the last /model pick.
+
+    Claude Code writes this whenever you switch model in-session ("Set model to
+    X and saved as your default for new sessions"), and it outranks the
+    ANTHROPIC_DEFAULT_*_MODEL env vars on the next launch.
+    """
+    try:
+        with open(claude_settings_path(), encoding="utf-8") as f:
+            return (json.load(f).get("model") or "").strip()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+
+
+def is_anthropic_model(model):
+    """True for names api.anthropic.com understands (aliases and claude-* ids)."""
+    m = model.strip().lower()
+    return m in {"opus", "sonnet", "haiku", "opusplan", "default"} or m.startswith("claude-")
+
+
+def has_model_arg(args):
+    """True if the user already passed --model / -m themselves."""
+    for a in args:
+        if a == "--model" or a == "-m" or a.startswith("--model="):
+            return True
+    return False
+
+
+def launch_claude(args, model=None):
     """Run claude as a subprocess, inheriting this process's environment.
 
     Resolve claude with shutil.which (on Windows it is a .cmd installed by npm;
     subprocess.run(["claude"]) alone cannot find it, so resolve the full path).
+
+    `model` is passed through as --model. This matters because Claude Code
+    persists the model you pick with /model into ~/.claude/settings.json as a
+    top-level "model" key, and that saved value outranks the
+    ANTHROPIC_DEFAULT_*_MODEL env vars we set here. Without an explicit
+    --model, a model saved by an earlier session (possibly for a different
+    provider) leaks into every later launch. --model overrides the saved
+    setting for this session only and does not write it back.
     """
     import shutil
     exe = shutil.which("claude")
     if not exe:
         print("[ERROR] claude command not found. Install it first: npm install -g @anthropic-ai/claude-code")
         sys.exit(1)
-    return subprocess.run([exe] + list(args))
+    argv = list(args)
+    if model and not has_model_arg(argv):
+        argv = ["--model", model] + argv
+    return subprocess.run([exe] + argv)
 
 
 def server_up():
@@ -136,15 +183,34 @@ Usage:
   ccc <provider> [claude args]  Start claude with a provider
   ccc clear [claude args]     Clear provider config, use default Anthropic
   ccc server                  Start the local proxy (Method 2 server, keep running)
-  ccc all [claude args]       Start claude through the proxy (Method 2 client)
+  ccc all <provider> [claude args]
+                              Start claude through the proxy on <provider>
   ccc help                    Show this help
 
 Examples:
   ccc providers               # open the provider manager
-  ccc my-provider -m model    # start claude with a provider
+  ccc my-provider --model sonnet   # start claude with a provider
   ccc server                  # start the proxy in terminal A
-  ccc all                     # start claude through the proxy in terminal B
+  ccc all my-provider         # start claude through the proxy in terminal B
 """, end="")
+
+
+def provider_tier_alias(env):
+    """Pick the --model alias matching the tiers this provider actually defines.
+
+    Claude Code resolves the aliases opus/sonnet/haiku through
+    ANTHROPIC_DEFAULT_<TIER>_MODEL, so the alias yields this provider's own
+    model name. Skip tiers the provider left blank: for those the alias falls
+    back to a built-in Anthropic model name the provider likely rejects.
+    """
+    for alias, field in (
+        ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+    ):
+        if env.get(field, "").strip():
+            return alias
+    return None
 
 
 def cmd_run(name, args):
@@ -164,16 +230,28 @@ def cmd_run(name, args):
     for k in ANTHROPIC_VARS:
         os.environ.pop(k, None)
     os.environ.update(env)
+    alias = provider_tier_alias(env)
+    if alias is None:
+        print(f"[WARN] Provider '{name}' defines no default model; "
+              f"claude may start on whatever model it last saved.")
     print(f"Starting claude with {name} ...")
-    launch_claude(args)
+    launch_claude(args, model=alias)
 
 
 def cmd_clear(args):
     apply_dotenv()
     for k in ANTHROPIC_VARS:
         os.environ.pop(k, None)
+    # A provider-specific model saved by an earlier ccc session (e.g. "deepseek")
+    # would otherwise be sent to api.anthropic.com, which does not know it.
+    # Only override when the saved value is clearly not an Anthropic model.
+    model = None
+    saved = saved_model()
+    if saved and not is_anthropic_model(saved):
+        model = "opus"
+        print(f"Saved model '{saved}' is not an Anthropic model; starting on opus instead.")
     print("Cleared provider config, starting claude with default Anthropic ...")
-    launch_claude(args)
+    launch_claude(args, model=model)
 
 
 def cmd_server():
@@ -183,25 +261,58 @@ def cmd_server():
     sys.exit(subprocess.run([sys.executable, proxy]).returncode)
 
 
-def cmd_all(args):
+def cmd_all(name, args):
     data = load_data()
-    if not get_providers(data):
+    providers = get_providers(data)
+    if not providers:
         print("[ERROR] No providers configured yet. Run ccc providers to add one.")
         sys.exit(1)
+    if not name:
+        print("[ERROR] ccc all needs a provider: ccc all <provider> [claude args]")
+        print("        Configured: " + ", ".join(p["name"] for p in providers))
+        sys.exit(1)
+    p = find_provider(data, name)
+    if not p:
+        print(f"[ERROR] Provider '{name}' does not exist. Run ccc providers to add it.")
+        sys.exit(1)
+    env = p.get("env", {})
     if not server_up():
         print(f"[ERROR] Local proxy is not running ({PROXY_BASE}/health unreachable).")
         print("        Start it in another terminal first: ccc server")
         sys.exit(1)
     apply_dotenv()
+    for k in ANTHROPIC_VARS:
+        os.environ.pop(k, None)
     # Use ANTHROPIC_AUTH_TOKEN instead of ANTHROPIC_API_KEY: claude's /model
     # validation resolves auth reliably with AUTH_TOKEN; with API_KEY it can
     # report "Could not resolve authentication method". The proxy does the real
     # auth, so the value here is just a dummy.
-    os.environ.pop("ANTHROPIC_API_KEY", None)  # keep only one auth variable
     os.environ["ANTHROPIC_BASE_URL"] = PROXY_BASE
     os.environ["ANTHROPIC_AUTH_TOKEN"] = "dummy"
-    print("Starting claude through the local proxy ... switch providers in-session with /model provider/model")
-    launch_claude(args)
+
+    # Point every tier at "<provider>/<model>". Claude Code resolves its own
+    # background and subagent calls through these vars, so prefixing them keeps
+    # those requests routable: without a prefix it sends built-in names like
+    # claude-opus-5, which name no provider and the proxy refuses.
+    tiers = {}
+    for var in ("ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+        model = env.get(var, "").strip()
+        if model:
+            tiers[var] = f"{name}/{model}"
+    if not tiers:
+        print(f"[ERROR] Provider '{name}' defines no default model "
+              f"(ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL). Run ccc providers to set one.")
+        sys.exit(1)
+    os.environ.update(tiers)
+    # Tiers the provider left blank would otherwise fall back to a built-in
+    # Anthropic name, so start on a tier it actually defines.
+    alias = provider_tier_alias(env)
+
+    print(f"Starting claude through the local proxy on {name} ... "
+          f"switch providers in-session with /model provider/model")
+    launch_claude(args, model=alias)
 
 
 # ---------- Provider manager (interactive) ----------
@@ -410,7 +521,7 @@ def main():
     elif cmd == "server":
         cmd_server()
     elif cmd == "all":
-        cmd_all(argv[1:])
+        cmd_all(argv[1] if len(argv) > 1 else "", argv[2:])
     elif cmd == "help":
         cmd_help()
     elif is_valid_name(cmd) and find_provider(load_data(), cmd):

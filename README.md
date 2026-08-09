@@ -10,7 +10,7 @@ One command to switch Claude Code between any Anthropic-compatible provider.
 
 - Manage providers with `ccc providers`
 - **Method 1** — `ccc <name>`: start claude with a specific provider
-- **Method 2** — `ccc server` + `ccc all`: a local proxy, switch providers in-session with `/model`
+- **Method 2** — `ccc server` + `ccc all <name>`: a local proxy, switch providers in-session with `/model`
 
 ## Install
 
@@ -85,7 +85,7 @@ Anthropic with `ccc clear`.
 
 ```cmd
 ccc deepseek
-ccc kimi -m some-model
+ccc kimi --model sonnet
 ```
 
 ## Method 2 — switch in-session
@@ -93,11 +93,12 @@ ccc kimi -m some-model
 Runs a local proxy that routes each request to the provider named in the model field;
 claude talks to the proxy, so you switch providers mid-session with `/model`.
 
-Start the proxy in one terminal, then launch claude through it in another:
+Start the proxy in one terminal, then launch claude through it in another. `ccc all`
+takes the provider to start on:
 
 ```cmd
 ccc server
-ccc all
+ccc all deepseek
 ```
 
 Inside the claude session, the general format is `/model <provider_name>` or
